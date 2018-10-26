@@ -184,15 +184,9 @@
 	<cffunction name="onRequest" output="true" returntype="boolean">
 		<cfargument name="targetPage" type="string" required="true" />
 
-		<cfset var _taffyRequest = {} />
 		<cfset var local = {} />
-		<cfset var m = '' />
-		<cfset request._taffyRequest = _taffyRequest />
-		<cfset local.debug = false />
-
-		<cfset _taffyRequest.metrics = {} />
-		<cfset m = _taffyRequest.metrics />
-		<cfset m.init = getTickCount() />
+		<cfset local.requestMetrics = {} />
+		<cfset local.requestMetrics.init = getTickCount() />
 
 		<!--- enable/disable debug output per settings --->
 		<cfif not structKeyExists(url, application._taffy.settings.debugKey)>
@@ -225,300 +219,313 @@
 			</cfif>
 		</cfif>
 
-		<!--- get request details --->
-		<cfset m.beforeParse = getTickCount() />
-		<cfset local.parsed = parseRequest() />
-		<cfset m.afterParse = getTickCount() />
-		<cfset structAppend(_taffyRequest, local.parsed) />
-		<cfset m.parseTime = m.afterParse - m.beforeParse />
+		<cfset local.requestMetrics.beforeParse = getTickCount() />
+		<cfset local.parsedRequest = parseRequest() />
+		<cfset local.requestMetrics.afterParse = getTickCount() />
+		<cfset local.requestMetrics.parseTime = local.requestMetrics.afterParse - local.requestMetrics.beforeParse />
 
-		<!--- CORS headers (so that CORS can pass even if the resource throws an exception) --->
-		<cfset local.allowVerbs = uCase(structKeyList(_taffyRequest.matchDetails.methods)) />
-		<cfif (application._taffy.settings.allowCrossDomain eq true or len(application._taffy.settings.allowCrossDomain) gt 0)
-				AND listFindNoCase('PUT,PATCH,DELETE,OPTIONS',_taffyRequest.verb)
-				AND NOT listFind(local.allowVerbs,'OPTIONS')>
-		    <cfset local.allowVerbs = listAppend(local.allowVerbs,'OPTIONS') />
-		</cfif>
-		<cfif structKeyExists(_taffyRequest.headers, "origin") AND (application._taffy.settings.allowCrossDomain eq true or len(application._taffy.settings.allowCrossDomain) gt 0)>
-			<cfif application._taffy.settings.allowCrossDomain eq true>
-				<cfheader name="Access-Control-Allow-Origin" value="*" />
-			<cfelse>
-				<!---
-					The Access-Control-Allow-Origin header can only have 1 value so we check to see if the Origin header is
-					in the list of origins specified in the config setting and parrot back the Origin header if so.
-					We also need to add the Access-Control-Allow-Credentials header and set it to true for those type requests
-				--->
-				<cfset local.domains = listToArray( application._taffy.settings.allowCrossDomain, ', ;' )>
-				<cfif structKeyExists(_taffyRequest.headers, "origin")>
-					<cfloop from="1" to="#arrayLen( local.domains )#" index="local.i">
-						<cfif lcase( rereplace( _taffyRequest.headers.origin, "(http|https):\/\/", "", "all" ) ) EQ lcase( rereplace( local.domains[ local.i ], "(http|https):\/\/", "", "all" ) ) >
-							<cfheader name="Access-Control-Allow-Origin" value="#_taffyRequest.headers.origin#" />
-							<cfheader name="Access-Control-Allow-Credentials" value="true" />
-							<cfbreak>
-						</cfif>
-					</cfloop>
-				</cfif>
+		<cfloop from="1" to="#arrayLen(local.parsedRequest)#" index="local.i">
+			<cfset _taffyRequest = local.parsedRequest[local.i] />
+			<cfset _taffyRequest.responseHeaders = {} />
+
+			<!--- CORS headers (so that CORS can pass even if the resource throws an exception) --->
+			<cfset local.allowVerbs = uCase(structKeyList(_taffyRequest.matchDetails.methods)) />
+			<cfif (application._taffy.settings.allowCrossDomain eq true or len(application._taffy.settings.allowCrossDomain) gt 0)
+					AND listFindNoCase('PUT,PATCH,DELETE,OPTIONS',_taffyRequest.verb)
+					AND NOT listFind(local.allowVerbs,'OPTIONS')>
+			    <cfset local.allowVerbs = listAppend(local.allowVerbs,'OPTIONS') />
 			</cfif>
-			<cfheader name="Access-Control-Allow-Methods" value="#local.allowVerbs#" />
-			<!--- Why do we parrot back these headers? See: https://github.com/atuttle/Taffy/issues/144 --->
-			<cfif not structKeyExists(_taffyRequest.headers, "Access-Control-Request-Headers")>
-				<cfheader name="Access-Control-Allow-Headers" value="Origin, Authorization, X-CSRF-Token, X-Requested-With, Content-Type, X-HTTP-Method-Override, Accept, Referrer, User-Agent" />
-			<cfelse>
-				<!--- parrot back all of the request headers to allow the request to continue (can we improve on this?) --->
-				<cfset local.allowedHeaders = {} />
-				<cfloop list="Origin,Authorization,X-CSRF-Token,X-Requested-With,Content-Type,X-HTTP-Method-Override,Accept,Referrer,User-Agent" index="local.h">
-					<cfset local.allowedHeaders[local.h] = 1 />
-				</cfloop>
-				<cfset local.requestedHeaders = _taffyRequest.headers['Access-Control-Request-Headers'] />
-				<cfloop list="#local.requestedHeaders#" index="local.i">
-					<cfset local.allowedHeaders[ local.i ] = 1 />
-				</cfloop>
-				<cfheader name="Access-Control-Allow-Headers" value="#structKeyList(local.allowedHeaders)#" />
-			</cfif>
-		</cfif>
-
-		<!--- global headers --->
-		<cfset addHeaders(getGlobalHeaders()) />
-
-		<!---
-			Now we know everything we need to know to service the request. let's service it!
-		--->
-
-		<!--- ...after we let the api developer know all of the request details first... --->
-		<cfset m.beforeOnTaffyRequest = getTickCount() />
-		<cfset _taffyRequest.continue = onTaffyRequest(
-			_taffyRequest.verb
-			,_taffyRequest.matchDetails.beanName
-			,_taffyRequest.requestArguments
-			,_taffyRequest.returnMimeExt
-			,_taffyRequest.headers
-			,_taffyRequest.methodMetadata
-			,local.parsed.matchDetails.srcUri
-		) />
-		<cfset m.afterOnTaffyRequest = getTickCount() />
-		<cfset m.otrTime = m.afterOnTaffyRequest - m.beforeOnTaffyRequest />
-
-		<cfif not structKeyExists(_taffyRequest, "continue")>
-			<!--- developer forgot to return true --->
-			<cfthrow
-				message="Error in your onTaffyRequest method"
-				detail="Your onTaffyRequest method returned no value. Expected: Return TRUE or call noData()/representationOf()."
-				errorcode="400"
-			/>
-		</cfif>
-
-		<cfif isObject(_taffyRequest.continue)>
-			<!--- inspection complete but request has been aborted by developer; return custom response --->
-			<cfset _taffyRequest.result = duplicate(_taffyRequest.continue) />
-			<cfset structDelete(_taffyRequest, "continue")/>
-			<cfset m.resourceTime = 0 />
-		<cfelse>
-			<!--- inspection complete and request allowed by developer; send request to service --->
-
-			<cfif structKeyExists(_taffyRequest.matchDetails.methods, _taffyRequest.verb)>
-				<!--- check the cache before we call the resource --->
-				<cfset m.cacheCheckTime = getTickCount() />
-				<cfset local.cacheKey = local.parsed.uri & "_" & _taffyRequest.requestArguments.hashCode() />
-				<cfif ucase(_taffyRequest.verb) eq "GET" and validCacheExists(local.cacheKey)>
-					<cfset m.cacheCheckTime = getTickCount() - m.cacheCheckTime />
-					<cfset m.cacheGetTime = getTickCount() />
-					<cfset _taffyRequest.result = getCachedResponse(local.cacheKey) />
-					<cfset m.cacheGetTime = m.cacheGetTime - getTickCount() />
+			<cfif structKeyExists(_taffyRequest.headers, "origin") AND (application._taffy.settings.allowCrossDomain eq true or len(application._taffy.settings.allowCrossDomain) gt 0)>
+				<cfif application._taffy.settings.allowCrossDomain eq true>
+					<cfset _taffyRequest.responseHeaders["Access-Control-Allow-Origin"] = "*" />
 				<cfelse>
-					<cfif ucase(_taffyRequest.verb) eq "GET">
-						<cfset m.cacheCheckTime = getTickCount() - m.cacheCheckTime />
-					<cfelse>
-						<cfset structDelete(m, "cacheCheckTime") />
-					</cfif>
-					<!--- returns a representation-object --->
-					<cfset m.beforeResource = getTickCount() />
-					<cfinvoke
-						component="#application._taffy.factory.getBean(_taffyRequest.matchDetails.beanName)#"
-						method="#_taffyRequest.method#"
-						argumentcollection="#_taffyRequest.requestArguments#"
-						returnvariable="_taffyRequest.result"
-					/>
-					<cfset m.afterResource = getTickCount() />
-					<cfset m.resourceTime = m.afterResource - m.beforeResource />
-					<cfif !isDefined("_taffyRequest.result")>
-						<cfthrow
-							message="Resource did not return a value"
-							detail="The resource is expected to return a call to rep()/representationOf() or noData(). It appears there was no return at all."
-							errorcode="taffy.resources.ResourceReturnsNothing"
-						/>
-					</cfif>
-					<cfif ucase(_taffyRequest.verb) eq "GET">
-						<cfset m.cacheSaveStart = getTickCount() />
-						<cfset setCachedResponse(local.cacheKey, _taffyRequest.result.getData()) />
-						<cfset m.cacheSaveTime = getTickCount() - m.cacheSaveStart />
+					<!---
+						The Access-Control-Allow-Origin header can only have 1 value so we check to see if the Origin header is
+						in the list of origins specified in the config setting and parrot back the Origin header if so.
+						We also need to add the Access-Control-Allow-Credentials header and set it to true for those type requests
+					--->
+					<cfset local.domains = listToArray( application._taffy.settings.allowCrossDomain, ', ;' )>
+					<cfif structKeyExists(_taffyRequest.headers, "origin")>
+						<cfloop from="1" to="#arrayLen( local.domains )#" index="local.i">
+							<cfif lcase( rereplace( _taffyRequest.headers.origin, "(http|https):\/\/", "", "all" ) ) EQ lcase( rereplace( local.domains[ local.i ], "(http|https):\/\/", "", "all" ) ) >
+								<cfset _taffyRequest.responseHeaders["Access-Control-Allow-Origin"] = _taffyRequest.headers.origin />
+								<cfset _taffyRequest.responseHeaders["Access-Control-Allow-Credentials"] = "true" />
+								<cfbreak />
+							</cfif>
+						</cfloop>
 					</cfif>
 				</cfif>
-			<cfelseif NOT listFind(local.allowVerbs,_taffyRequest.verb)>
-				<!--- if the verb is not implemented, refuse the request --->
-				<cfheader name="ALLOW" value="#local.allowVerbs#" />
-				<cfset throwError(405, "Method Not Allowed") />
-			<cfelse>
-				<!--- create dummy response for cross domain OPTIONS request --->
-				<cfset _taffyRequest.resultHeaders = structNew() />
-				<cfset _taffyRequest.statusArgs = structNew() />
-				<cfset _taffyRequest.statusArgs.statusCode = 200 />
-				<cfset _taffyRequest.statusArgs.statusText = 'OK' />
+				<cfset _taffyRequest.responseHeaders["Access-Control-Allow-Methods"] = local.allowVerbs />
+				<!--- Why do we parrot back these headers? See: https://github.com/atuttle/Taffy/issues/144 --->
+				<cfif not structKeyExists(_taffyRequest.headers, "Access-Control-Request-Headers")>
+					<cfset _taffyRequest.responseHeaders["Access-Control-Allow-Headers"] = "Origin, Authorization, X-CSRF-Token, X-Requested-With, Content-Type, X-HTTP-Method-Override, Accept, Referrer, User-Agent" />
+				<cfelse>
+					<!--- parrot back all of the request headers to allow the request to continue (can we improve on this?) --->
+					<cfset local.allowedHeaders = {} />
+					<cfloop list="Origin,Authorization,X-CSRF-Token,X-Requested-With,Content-Type,X-HTTP-Method-Override,Accept,Referrer,User-Agent" index="local.h">
+						<cfset local.allowedHeaders[local.h] = 1 />
+					</cfloop>
+					<cfset local.requestedHeaders = _taffyRequest.headers['Access-Control-Request-Headers'] />
+					<cfloop list="#local.requestedHeaders#" index="local.i">
+						<cfset local.allowedHeaders[ local.i ] = 1 />
+					</cfloop>
+					<cfset _taffyRequest.responseHeaders["Access-Control-Allow-Headers"] = structKeyList(local.allowedHeaders) />
+				</cfif>
 			</cfif>
 
-		</cfif>
-		<!--- make sure the requested mime type is available --->
-		<cfif not mimeSupported(_taffyRequest.returnMimeExt)>
-			<cfset throwError(400, "Requested format not available (#_taffyRequest.returnMimeExt#)") />
-		</cfif>
+			<!--- global headers --->
+			<cfset structAppend(_taffyRequest.responseHeaders, getGlobalHeaders()) />
 
-		<cfif structKeyExists(_taffyRequest,'result')>
-			<!--- get status code --->
-			<cfset _taffyRequest.statusArgs = structNew() />
-			<cfset _taffyRequest.statusArgs.statusCode = _taffyRequest.result.getStatus() />
-			<cfset _taffyRequest.statusArgs.statusText = _taffyRequest.result.getStatusText() />
-			<!--- get custom headers --->
-			<cfinvoke
-				component="#_taffyRequest.result#"
-				method="getHeaders"
-				returnvariable="_taffyRequest.resultHeaders"
-			/>
-		</cfif>
+			<!---
+				Now we know everything we need to know to service the request. let's service it!
+			--->
 
-		<cfsetting enablecfoutputonly="true" />
-		<cfcontent reset="true" type="#getReturnMimeAsHeader(_taffyRequest.returnMimeExt)#; charset=utf-8" />
-		<cfheader statuscode="#_taffyRequest.statusArgs.statusCode#" statustext="#_taffyRequest.statusArgs.statusText#" />
+			<!--- ...after we let the api developer know all of the request details first... --->
+			<cfset _taffyRequest.metrics.beforeOnTaffyRequest = getTickCount() />
+			<cfset _taffyRequest.continue = onTaffyRequest(
+				_taffyRequest.verb
+				,_taffyRequest.matchDetails.beanName
+				,_taffyRequest.requestArguments
+				,_taffyRequest.returnMimeExt
+				,_taffyRequest.headers
+				,_taffyRequest.methodMetadata
+				,_taffyRequest.matchDetails.srcUri
+			) />
+			<cfset _taffyRequest.metrics.afterOnTaffyRequest = getTickCount() />
+			<cfset _taffyRequest.metrics.otrTime = _taffyRequest.metrics.afterOnTaffyRequest - _taffyRequest.metrics.beforeOnTaffyRequest />
 
-		<!--- headers --->
-		<cfset addHeaders(_taffyRequest.resultHeaders) />
+			<cfif not structKeyExists(_taffyRequest, "continue")>
+				<!--- developer forgot to return true --->
+				<cfthrow
+					message="Error in your onTaffyRequest method"
+					detail="Your onTaffyRequest method returned no value. Expected: Return TRUE or call noData()/representationOf()."
+					errorcode="400"
+				/>
+			</cfif>
 
-		<!--- add ALLOW header for current resource, which describes available verbs --->
-		<cfheader name="ALLOW" value="#local.allowVerbs#" />
+			<cfif isObject(_taffyRequest.continue)>
+				<!--- inspection complete but request has been aborted by developer; return custom response --->
+				<cfset _taffyRequest.result = duplicate(_taffyRequest.continue) />
+				<cfset structDelete(_taffyRequest, "continue")/>
+				<cfset _taffyRequest.metrics.resourceTime = 0 />
+			<cfelse>
+				<!--- inspection complete and request allowed by developer; send request to service --->
+				<cfif structKeyExists(_taffyRequest.matchDetails.methods, _taffyRequest.verb)>
+					<!--- check the cache before we call the resource --->
+					<cfset _taffyRequest.metrics.cacheCheckTime = getTickCount() />
+					<cfset local.cacheKey = _taffyRequest.uri & "_" & _taffyRequest.requestArguments.hashCode() />
+					<cfif ucase(_taffyRequest.verb) eq "GET" and validCacheExists(local.cacheKey)>
+						<cfset _taffyRequest.metrics.cacheCheckTime = getTickCount() - _taffyRequest.metrics.cacheCheckTime />
+						<cfset _taffyRequest.metrics.cacheGetTime = getTickCount() />
+						<cfset _taffyRequest.result = getCachedResponse(local.cacheKey) />
+						<cfset _taffyRequest.metrics.cacheGetTime = _taffyRequest.metrics.cacheGetTime - getTickCount() />
+					<cfelse>
+						<cfif ucase(_taffyRequest.verb) eq "GET">
+							<cfset _taffyRequest.metrics.cacheCheckTime = getTickCount() - _taffyRequest.metrics.cacheCheckTime />
+						<cfelse>
+							<cfset structDelete(_taffyRequest.metrics, "cacheCheckTime") />
+						</cfif>
+						<!--- returns a representation-object --->
+						<cfset _taffyRequest.metrics.beforeResource = getTickCount() />
+						<cfinvoke
+							component="#application._taffy.factory.getBean(_taffyRequest.matchDetails.beanName)#"
+							method="#_taffyRequest.method#"
+							argumentcollection="#_taffyRequest.requestArguments#"
+							returnvariable="_taffyRequest.result"
+						/>
+						<cfset _taffyRequest.metrics.afterResource = getTickCount() />
+						<cfset _taffyRequest.metrics.resourceTime = _taffyRequest.metrics.afterResource - _taffyRequest.metrics.beforeResource />
+						<cfif !isDefined("_taffyRequest.result")>
+							<cfthrow
+								message="Resource did not return a value"
+								detail="The resource is expected to return a call to rep()/representationOf() or noData(). It appears there was no return at all."
+								errorcode="taffy.resources.ResourceReturnsNothing"
+							/>
+						</cfif>
+						<cfif ucase(_taffyRequest.verb) eq "GET">
+							<cfset _taffyRequest.metrics.cacheSaveStart = getTickCount() />
+							<cfset setCachedResponse(local.cacheKey, _taffyRequest.result.getData()) />
+							<cfset _taffyRequest.metrics.cacheSaveTime = getTickCount() - _taffyRequest.metrics.cacheSaveStart />
+						</cfif>
+					</cfif>
+				<cfelseif NOT listFind(local.allowVerbs,_taffyRequest.verb)>
+					<!--- if the verb is not implemented, refuse the request --->
+					<cfset _taffyRequest.responseHeaders["ALLOW"] = local.allowVerbs />
+					<cfset throwError(405, "Method Not Allowed") />
+				<cfelse>
+					<!--- create dummy response for cross domain OPTIONS request --->
+					<cfset _taffyRequest.resultHeaders = structNew() />
+					<cfset _taffyRequest.statusArgs = structNew() />
+					<cfset _taffyRequest.statusArgs.statusCode = 200 />
+					<cfset _taffyRequest.statusArgs.statusText = 'OK' />
+				</cfif>
+			</cfif>
 
-		<!--- metrics headers that should always apply --->
-		<cfheader name="X-TIME-IN-PARSE" value="#m.parseTime#" />
-		<cfheader name="X-TIME-IN-ONTAFFYREQUEST" value="#m.otrTime#" />
-		<cfif structKeyExists(m, "resourceTime")>
-			<cfheader name="X-TIME-IN-RESOURCE" value="#m.resourceTime#" />
-		</cfif>
-		<cfif structKeyExists(m, "cacheCheckTime")>
-			<cfheader name="X-TIME-IN-CACHE-CHECK" value="#m.cacheCheckTime#" />
-		</cfif>
-		<cfif structKeyExists(m, "cacheGetTime")>
-			<cfheader name="X-TIME-IN-CACHE-GET" value="#m.cacheGetTime#" />
-		</cfif>
-		<cfif structKeyExists(m, "cacheSaveTime")>
-			<cfheader name="X-TIME-IN-CACHE-SAVE" value="#m.cacheSaveTime#" />
-		</cfif>
+			<!--- make sure the requested mime type is available --->
+			<cfif not mimeSupported(_taffyRequest.returnMimeExt)>
+				<cfset throwError(400, "Requested format not available (#_taffyRequest.returnMimeExt#)") />
+			</cfif>
 
-		<!--- result data --->
-		<cfif structKeyExists(_taffyRequest,'result')>
-			<cfset _taffyRequest.resultType = _taffyRequest.result.getType() />
-			<cfset local.resultSerialized = '' />
-
-			<cfif _taffyRequest.resultType eq "textual">
-				<!--- serialize the representation's data into the requested mime type --->
-				<cfset _taffyRequest.metrics.beforeSerialize = getTickCount() />
+			<cfif structKeyExists(_taffyRequest,'result')>
+				<!--- get status code --->
+				<cfset _taffyRequest.statusArgs = structNew() />
+				<cfset _taffyRequest.statusArgs.statusCode = _taffyRequest.result.getStatus() />
+				<cfset _taffyRequest.statusArgs.statusText = _taffyRequest.result.getStatusText() />
+				<!--- get custom headers --->
 				<cfinvoke
 					component="#_taffyRequest.result#"
-					method="getAs#_taffyRequest.returnMimeExt#"
-					returnvariable="_taffyRequest.resultSerialized"
+					method="getHeaders"
+					returnvariable="_taffyRequest.resultHeaders"
 				/>
-				<cfset _taffyRequest.metrics.afterSerialize = getTickCount() />
-				<cfset m.serializeTime = m.afterSerialize - m.beforeSerialize />
-				<cfheader name="X-TIME-IN-SERIALIZE" value="#m.serializeTime#" />
-
-				<!--- apply jsonp wrapper if requested --->
-				<cfif structKeyExists(_taffyRequest, "jsonpCallback")>
-					<cfset _taffyRequest.resultSerialized = _taffyRequest.jsonpCallback & "(" & _taffyRequest.resultSerialized & ");" />
-				</cfif>
-
-				<!--- don't return data if etags are enabled and the data hasn't changed --->
-				<cfif application._taffy.settings.useEtags and _taffyRequest.verb eq "GET">
-					<cfif structKeyExists(_taffyRequest.headers, "If-None-Match")>
-						<cfset _taffyRequest.clientEtag = _taffyRequest.headers['If-None-Match'] />
-						<cfset _taffyRequest.serverEtag = _taffyRequest.result.getData().hashCode() />
-						<cfif len(_taffyRequest.clientEtag) gt 0 and _taffyRequest.clientEtag eq _taffyRequest.serverEtag>
-							<cfheader statuscode="304" statustext="Not Modified" />
-							<cfcontent reset="true" type="#application._taffy.settings.mimeExtensions[_taffyRequest.returnMimeExt]#; charset=utf-8" />
-							<cfreturn true />
-						<cfelse>
-							<cfheader name="Etag" value="#_taffyRequest.serverEtag#" />
-						</cfif>
-					<cfelse>
-						<cfheader name="Etag" value="#_taffyRequest.result.getData().hashCode()#" />
-					</cfif>
-				</cfif>
-
-				<cfset m.done = getTickCount() />
-				<cfset m.taffyTime = m.done - m.init - m.parseTime - m.otrTime - m.serializeTime />
-				<cfif structKeyExists(m, "resourceTime")>
-					<cfset m.taffyTime -= m.resourceTime />
-				</cfif>
-				<cfheader name="X-TIME-IN-TAFFY" value="#m.taffyTime#" />
-
-				<cfcontent reset="true" type="#application._taffy.settings.mimeExtensions[_taffyRequest.returnMimeExt]#; charset=utf-8" />
-				<cfif _taffyRequest.resultSerialized neq ('"' & '"')>
-					<cfset local.resultSerialized = _taffyRequest.resultSerialized />
-				</cfif>
-				<!--- debug output --->
-				<cfif structKeyExists(url, application._taffy.settings.debugKey)>
-					<cfset local.debug = true />
-				</cfif>
-
-			<cfelseif _taffyRequest.resultType eq "filename">
-				<cfset m.done = getTickCount() />
-				<cfset m.taffyTime = m.done - m.init - m.parseTime - m.otrTime - m.resourceTime />
-				<cfheader name="X-TIME-IN-TAFFY" value="#m.taffyTime#" />
-				<cfcontent reset="true" file="#_taffyRequest.result.getFileName()#" type="#_taffyRequest.result.getFileMime()#" deletefile="#_taffyRequest.result.getDeleteFile()#" />
-
-			<cfelseif _taffyRequest.resultType eq "filedata">
-				<cfset m.done = getTickCount() />
-				<cfset m.taffyTime = m.done - m.init - m.parseTime - m.otrTime - m.resourceTime />
-				<cfheader name="X-TIME-IN-TAFFY" value="#m.taffyTime#" />
-				<cfcontent reset="true" variable="#_taffyRequest.result.getFileData()#" type="#_taffyRequest.result.getFileMime()#" />
-
-			<cfelseif _taffyRequest.resultType eq "imagedata">
-				<cfset m.done = getTickCount() />
-				<cfset m.taffyTime = m.done - m.init - m.parseTime - m.otrTime - m.resourceTime />
-				<cfheader name="X-TIME-IN-TAFFY" value="#m.taffyTime#" />
-				<cfcontent reset="true" variable="#_taffyRequest.result.getImageData()#" type="#_taffyRequest.result.getFileMime()#" />
-
 			</cfif>
+<!--- TODO --->
+			<cfsetting enablecfoutputonly="true" />
+			<cfcontent reset="true" type="#getReturnMimeAsHeader(_taffyRequest.returnMimeExt)#; charset=utf-8" />
+			<cfheader statuscode="#_taffyRequest.statusArgs.statusCode#" statustext="#_taffyRequest.statusArgs.statusText#" />
+
+			<!--- headers --->
+			<cfset structAppend(_taffyRequest.headers, _taffyRequest.resultHeaders) />
+
+			<!--- add ALLOW header for current resource, which describes available verbs --->
+			<cfset _taffyRequest.responseHeaders["ALLOW"] = local.allowVerbs />
+
+			<!--- metrics headers that should always apply --->
+			<cfset _taffyRequest.responseHeaders["X-TIME-IN-PARSE"] = _taffyRequest.metrics.parseTime />
+			<cfset _taffyRequest.responseHeaders["X-TIME-IN-ONTAFFYREQUEST"] = _taffyRequest.metrics.otrTime />
+			<cfif structKeyExists(_taffyRequest.metrics, "resourceTime")>
+				<cfset _taffyRequest.responseHeaders["X-TIME-IN-RESOURCE"] = _taffyRequest.metrics.resourceTime />
+			</cfif>
+			<cfif structKeyExists(_taffyRequest.metrics, "cacheCheckTime")>
+				<cfset _taffyRequest.responseHeaders["X-TIME-IN-CACHE-CHECK"] = _taffyRequest.metrics.cacheCheckTime />
+			</cfif>
+			<cfif structKeyExists(_taffyRequest.metrics, "cacheGetTime")>
+				<cfset _taffyRequest.responseHeaders["X-TIME-IN-CACHE-GET"] = _taffyRequest.metrics.cacheGetTime />
+			</cfif>
+			<cfif structKeyExists(_taffyRequest.metrics, "cacheSaveTime")>
+				<cfset _taffyRequest.responseHeaders["X-TIME-IN-CACHE-SAVE"] = _taffyRequest.metrics.cacheSaveTime />
+			</cfif>
+
+			<!--- result data --->
+			<cfif structKeyExists(_taffyRequest,'result')>
+				<cfset _taffyRequest.resultType = _taffyRequest.result.getType() />
+				<cfset local.resultSerialized = '' />
+
+				<cfif _taffyRequest.resultType eq "textual">
+					<!--- serialize the representation's data into the requested mime type --->
+					<cfset _taffyRequest.metrics.beforeSerialize = getTickCount() />
+					<cfinvoke
+						component="#_taffyRequest.result#"
+						method="getAs#_taffyRequest.returnMimeExt#"
+						returnvariable="_taffyRequest.resultSerialized"
+					/>
+					<cfset _taffyRequest.metrics.afterSerialize = getTickCount() />
+					<cfset _taffyRequest.metrics.serializeTime = _taffyRequest.metrics.afterSerialize - _taffyRequest.metrics.beforeSerialize />
+					<cfset _taffyRequest.responseHeaders["X-TIME-IN-SERIALIZE"] = _taffyRequest.metrics.serializeTime />
+
+					<!--- apply jsonp wrapper if requested --->
+					<cfif structKeyExists(_taffyRequest, "jsonpCallback")>
+						<cfset _taffyRequest.resultSerialized = _taffyRequest.jsonpCallback & "(" & _taffyRequest.resultSerialized & ");" />
+					</cfif>
+
+					<!--- don't return data if etags are enabled and the data hasn't changed --->
+					<cfif application._taffy.settings.useEtags and _taffyRequest.verb eq "GET">
+						<cfif structKeyExists(_taffyRequest.headers, "If-None-Match")>
+							<cfset _taffyRequest.clientEtag = _taffyRequest.headers['If-None-Match'] />
+							<cfset _taffyRequest.serverEtag = _taffyRequest.result.getData().hashCode() />
+							<cfif len(_taffyRequest.clientEtag) gt 0 and _taffyRequest.clientEtag eq _taffyRequest.serverEtag>
+<!--- TODO --->
+								<cfheader statuscode="304" statustext="Not Modified" />
+								<cfcontent reset="true" type="#application._taffy.settings.mimeExtensions[_taffyRequest.returnMimeExt]#; charset=utf-8" />
+								<cfreturn true />
+							<cfelse>
+								<cfset _taffyRequest.responseHeaders["Etag"] = _taffyRequest.serverEtag />
+							</cfif>
+						<cfelse>
+							<cfset _taffyRequest.responseHeaders["Etag"] = _taffyRequest.result.getData().hashCode() />
+						</cfif>
+					</cfif>
+
+					<cfset _taffyRequest.metrics.done = getTickCount() />
+					<cfset _taffyRequest.metrics.taffyTime = _taffyRequest.metrics.done - local.requestMetrics.init - _taffyRequest.metrics.parseTime - _taffyRequest.metrics.otrTime - _taffyRequest.metrics.serializeTime />
+					<cfif structKeyExists(_taffyRequest.metrics, "resourceTime")>
+						<cfset _taffyRequest.metrics.taffyTime -= _taffyRequest.metrics.resourceTime />
+					</cfif>
+					<cfset _taffyRequest.responseHeaders["X-TIME-IN-TAFFY"] = _taffyRequest.metrics.taffyTime />
+<!--- TODO --->
+					<cfcontent reset="true" type="#application._taffy.settings.mimeExtensions[_taffyRequest.returnMimeExt]#; charset=utf-8" />
+					<cfif _taffyRequest.resultSerialized neq ('"' & '"')>
+						<cfset local.resultSerialized = _taffyRequest.resultSerialized />
+					</cfif>
+
+				<cfelseif _taffyRequest.resultType eq "filename">
+					<cfset _taffyRequest.metrics.done = getTickCount() />
+					<cfset _taffyRequest.metrics.taffyTime = _taffyRequest.metrics.done - local.requestMetrics.init - _taffyRequest.metrics.parseTime - _taffyRequest.metrics.otrTime - _taffyRequest.metrics.resourceTime />
+					<cfset _taffyRequest.responseHeaders["X-TIME-IN-TAFFY"] = _taffyRequest.metrics.taffyTime />
+<!--- TODO --->
+					<cfcontent reset="true" file="#_taffyRequest.result.getFileName()#" type="#_taffyRequest.result.getFileMime()#" deletefile="#_taffyRequest.result.getDeleteFile()#" />
+
+				<cfelseif _taffyRequest.resultType eq "filedata">
+					<cfset _taffyRequest.metrics.done = getTickCount() />
+					<cfset _taffyRequest.metrics.taffyTime = _taffyRequest.metrics.done - local.requestMetrics.init - _taffyRequest.metrics.parseTime - _taffyRequest.metrics.otrTime - _taffyRequest.metrics.resourceTime />
+					<cfset _taffyRequest.responseHeaders["X-TIME-IN-TAFFY"] = _taffyRequest.metrics.taffyTime />
+<!--- TODO --->
+					<cfcontent reset="true" variable="#_taffyRequest.result.getFileData()#" type="#_taffyRequest.result.getFileMime()#" />
+
+				<cfelseif _taffyRequest.resultType eq "imagedata">
+					<cfset _taffyRequest.metrics.done = getTickCount() />
+					<cfset _taffyRequest.metrics.taffyTime = _taffyRequest.metrics.done - _taffyRequest.metrics.init - _taffyRequest.metrics.parseTime - _taffyRequest.metrics.otrTime - _taffyRequest.metrics.resourceTime />
+					<cfset _taffyRequest.responseHeaders["X-TIME-IN-TAFFY"] = _taffyRequest.metrics.taffyTime />
+<!--- TODO --->
+					<cfcontent reset="true" variable="#_taffyRequest.result.getImageData()#" type="#_taffyRequest.result.getFileMime()#" />
+
+				</cfif>
+			</cfif>
+
+			<cfset local.resultSerialized = "" />
+			<cfif structKeyExists( _taffyRequest, "resultSerialized" )>
+				<cfset local.resultSerialized = _taffyRequest.resultSerialized />
+			</cfif>
+
+			<cfset local.result = StructNew() />
+			<cfif structKeyExists( _taffyRequest, "result" )>
+				<cfset local.result = _taffyRequest.result.getData() />
+			</cfif>
+
+			<!--- ...after the service has finished... --->
+			<cfset _taffyRequest.metrics.beforeOnTaffyRequestEnd = getTickCount() />
+			<cfset onTaffyRequestEnd(
+				_taffyRequest.verb
+				,_taffyRequest.matchDetails.beanName
+				,_taffyRequest.requestArguments
+				,_taffyRequest.returnMimeExt
+				,_taffyRequest.headers
+				,_taffyRequest.methodMetadata
+				,_taffyRequest.matchDetails.srcUri
+				,local.resultSerialized
+				,local.result
+				,_taffyRequest.statusArgs.statusCode
+				) />
+			<cfset _taffyRequest.metrics.otreTime = getTickCount() - _taffyRequest.metrics.beforeOnTaffyRequestEnd />
+			<cfset _taffyRequest.responseHeaders["X-TIME-IN-ONTAFFYREQUESTEND"] = _taffyRequest.metrics.otreTime />
+
+			<cfif NOT structKeyExists(_taffyRequest, "batchedRequest") AND len(trim(local.resultSerialized))>
+				<cfoutput>#local.resultSerialized#</cfoutput>
+			<cfelse>
+				<cfset local.parsedRequest[local.i] = _taffyRequest />
+			</cfif>
+		</cfloop>
+
+		<cfif structKeyExists(_taffyRequest, "batchedRequest")>
+			<cfoutput>[<cfloop from="1" to="#arrayLen(local.parsedRequest)#" index="local.i"><cfif local.i GT 1>,</cfif>{"body":#local.parsedRequest[local.i].resultSerialized#,"headers":#serializeJson(local.parsedRequest[local.i].responseHeaders)#}</cfloop>]</cfoutput>
+		<cfelse>
+			<cfloop list="#structKeyList(_taffyRequest.responseHeaders)#" item="header">
+				<cfheader name="#header#" value="#_taffyRequest.responseHeaders[header]#" />
+			</cfloop>
 		</cfif>
 
-		<cfset local.resultSerialized = "" />
-		<cfif structKeyExists( _taffyRequest, "resultSerialized" )>
-			<cfset local.resultSerialized = _taffyRequest.resultSerialized />
-		</cfif>
-
-		<cfset local.result = StructNew() />
-		<cfif structKeyExists( _taffyRequest, "result" )>
-			<cfset local.result = _taffyRequest.result.getData() />
-		</cfif>
-
-		<!--- ...after the service has finished... --->
-		<cfset m.beforeOnTaffyRequestEnd = getTickCount() />
-		<cfset onTaffyRequestEnd(
-			_taffyRequest.verb
-			,_taffyRequest.matchDetails.beanName
-			,_taffyRequest.requestArguments
-			,_taffyRequest.returnMimeExt
-			,_taffyRequest.headers
-			,_taffyRequest.methodMetadata
-			,local.parsed.matchDetails.srcUri
-			,local.resultSerialized
-			,local.result
-			,_taffyRequest.statusArgs.statusCode
-			) />
-		<cfset m.otreTime = getTickCount() - m.beforeOnTaffyRequestEnd />
-		<cfheader name="X-TIME-IN-ONTAFFYREQUESTEND" value="#m.otreTime#" />
-
-		<cfif len(trim(local.resultSerialized))>
-			<cfoutput>#local.resultSerialized#</cfoutput>
-		</cfif>
 		<!--- debug output --->
-		<cfif local.debug>
-			<cfoutput><h3>Request Details:</h3><cfdump var="#_taffyRequest#"></cfoutput>
+		<cfif structKeyExists(url, application._taffy.settings.debugKey)>
+			<cfoutput><h3>Request Details:</h3><cfdump var="#local.parsedRequest#"></cfoutput>
 		</cfif>
 
 		<cfreturn true />
@@ -538,34 +545,36 @@
 		<cfset local._taffy.endpoints = structNew() />
 		<!--- default settings --->
 		<cfset local.defaultConfig = structNew() />
+		<cfset local.defaultConfig.allowCrossDomain = false />
+		<cfset local.defaultConfig.batchedRequestEndpoint = javaCast("null", "") />
+		<cfset local.defaultConfig.csrfToken = structNew() />
+		<cfset local.defaultConfig.csrfToken.cookieName = "" />
+		<cfset local.defaultConfig.csrfToken.headerName = "" />
+		<cfset local.defaultConfig.dashboardHeaders = {} />
+		<cfset local.defaultConfig.debugKey = "debug" />
+		<cfset local.defaultConfig.defaultMime = "" />
+		<cfset local.defaultConfig.deserializer = "taffy.core.nativeJsonDeserializer" />
+		<cfset local.defaultConfig.disableDashboard = false />
+		<cfset local.defaultConfig.disabledDashboardRedirect = "" />
 		<cfset local.defaultConfig.docs = structNew() />
 		<cfset local.defaultConfig.docs.APIName = "Your API Name (variables.framework.docs.APIName)" />
 		<cfset local.defaultConfig.docs.APIVersion = "0.0.0 (variables.framework.docs.APIVersion)" />
 		<cfset local.defaultConfig.docsPath = "../dashboard/docs.cfm" />
-		<cfset local.defaultConfig.defaultMime = "" />
-		<cfset local.defaultConfig.debugKey = "debug" />
+		<cfset local.defaultConfig.endpointURLParam = 'endpoint' />
+		<cfset local.defaultConfig.exceptionLogAdapter = "taffy.bonus.LogToDevNull" />
+		<cfset local.defaultConfig.exceptionLogAdapterConfig = StructNew() />
+		<cfset local.defaultConfig.globalHeaders = structNew() />
+		<cfset local.defaultConfig.jsonp = false />
+		<cfset local.defaultConfig.mimeTypes = structNew() />
+		<cfset local.defaultConfig.noDataSends204NoContent = false />
 		<cfset local.defaultConfig.reloadKey = "reload" />
 		<cfset local.defaultConfig.reloadPassword = "true" />
 		<cfset local.defaultConfig.reloadOnEveryRequest = false />
-		<cfset local.defaultConfig.endpointURLParam = 'endpoint' />
+		<cfset local.defaultConfig.returnExceptionsAsJson = true />
 		<cfset local.defaultConfig.serializer = "taffy.core.nativeJsonSerializer" />
-		<cfset local.defaultConfig.deserializer = "taffy.core.nativeJsonDeserializer" />
-		<cfset local.defaultConfig.disableDashboard = false />
-		<cfset local.defaultConfig.disabledDashboardRedirect = "" />
-		<cfset local.defaultConfig.dashboardHeaders = {} />
 		<cfset local.defaultConfig.showDocsWhenDashboardDisabled = false />
 		<cfset local.defaultConfig.unhandledPaths = "/flex2gateway" />
-		<cfset local.defaultConfig.allowCrossDomain = false />
 		<cfset local.defaultConfig.useEtags = false />
-		<cfset local.defaultConfig.jsonp = false />
-		<cfset local.defaultConfig.globalHeaders = structNew() />
-		<cfset local.defaultConfig.mimeTypes = structNew() />
-		<cfset local.defaultConfig.returnExceptionsAsJson = true />
-		<cfset local.defaultConfig.exceptionLogAdapter = "taffy.bonus.LogToDevNull" />
-		<cfset local.defaultConfig.exceptionLogAdapterConfig = StructNew() />
-		<cfset local.defaultConfig.csrfToken = structNew() />
-		<cfset local.defaultConfig.csrfToken.cookieName = "" />
-		<cfset local.defaultConfig.csrfToken.headerName = "" />
 		<!--- status --->
 		<cfset local._taffy.status = structNew() />
 		<cfset local._taffy.status.internalBeanFactoryUsed = false />
@@ -639,14 +648,13 @@
 		<cfset application._taffy = local._taffy />
 	</cffunction>
 
-	<cffunction name="parseRequest" access="private" output="false" returnType="struct">
-		<cfset var requestObj = {} />
-		<cfset var tmp = 0 />
+	<cffunction name="parseRequest" access="private" output="false" returnType="array">
 		<cfset var local = {} />
+		<cfset var resourceRequests = [] />
+		<cfset var requestObj = {} />
 
-		<!--- Check for method tunnelling by clients unable to send PUT/DELETE requests (e.g. Flash Player);
-					Actual desired method will be contained in a special header --->
- 		<cfset var httpMethodOverride = GetPageContext().getRequest().getHeader("X-HTTP-Method-Override") />
+		<cfset requestObj.metrics = {} />
+		<cfset requestObj.metrics.beforeParse = getTickCount() />
 
 		<cfset requestObj.uri = getPath() />
 		<cfif NOT len(requestObj.uri)>
@@ -658,116 +666,186 @@
 			</cfif>
 		</cfif>
 
- 		<!--- check for format in the URI --->
- 		<cfset requestObj.uriFormat = formatFromURI(requestObj.uri) />
-
-		<!--- attempt to find the cfc for the requested uri --->
-		<cfset requestObj.matchingRegex = matchURI(requestObj.uri) />
-
-		<!--- uri doesn't map to any known resources --->
-		<cfif not len(requestObj.matchingRegex)>
-			<cfset throwError(404, "Not Found") />
-		</cfif>
-
-		<!--- get the cfc name and token array for the matching regex --->
-		<cfset requestObj.matchDetails = application._taffy.endpoints[requestObj.matchingRegex] />
-
 		<!--- which verb is requested? --->
 		<cfset requestObj.verb = cgi.request_method />
 
 		<!--- Should we override the actual method based on method tunnelling? --->
-		<cfif isDefined("httpMethodOverride") AND not isNull(httpMethodOverride)>
-		    <cfset requestObj.verb = httpMethodOverride />
-		</cfif>
-
-		<cfif structKeyExists(application._taffy.endpoints[requestObj.matchingRegex].methods, requestObj.verb)>
-			<cfset requestObj.method = application._taffy.endpoints[requestObj.matchingRegex].methods[requestObj.verb] />
-		<cfelse>
-			<cfset requestObj.method = "" />
+		<cfset local.httpMethodOverride = GetPageContext().getRequest().getHeader("X-HTTP-Method-Override") />
+		<cfif structKeyExists(local, "httpMethodOverride") AND NOT isNull(local.httpMethodOverride)>
+			<cfset requestObj.verb = local.httpMethodOverride />
 		</cfif>
 
 		<cfset requestObj.body = getRequestBody() />
-		<cfset requestObj.contentType = cgi.content_type />
-		<cfif len(requestObj.body) AND requestObj.body neq "null">
-			<cfif findNoCase("multipart/form-data", requestObj.contentType)>
-				<!--- do nothing, to support the way railo handles multipart requests (just avoids the error condition below) --->
-				<cfset requestObj.queryString = cgi.query_string />
+
+		<cfif requestObj.verb IS "post"
+				AND structKeyExists(application._taffy.settings, "batchedRequestEndpoint")
+				AND requestObj.uri IS application._taffy.settings.batchedRequestEndpoint
+			>
+			<cfif isJson(requestObj.body)>
+				<cfset local.requests = deserializeJson(requestObj.body) />
+
+				<cfif isArray(local.requests)>
+					<cfloop array="#local.requests#" item="local.r">
+						<cfset requestObj = {} />
+						<cfset requestObj.batchedRequest = true />
+						<cfset requestObj.metrics = {} />
+						<cfset requestObj.metrics.beforeParse = getTickCount() />
+
+						<cfif isSimpleValue(local.r)>
+							<cfset requestObj.uri = listFirst(local.r, "?") />
+							<cfset requestObj.queryString = listLast(local.r, "?") />
+							<cfset requestObj.verb = "get" />
+							<cfset requestObj.contentType = cgi.content_type />
+							<cfset requestObj.body = "" />
+							<cfset requestObj.headers = {} />
+						<cfelseif isStruct(local.r) AND structKeyExists(local.r, application._taffy.settings.endpointURLParam)>
+							<cfset requestObj.uri = listFirst(local.r[application._taffy.settings.endpointURLParam], "?") />
+							<cfset requestObj.queryString = listLast(local.r[application._taffy.settings.endpointURLParam], "?") />
+							<cfset requestObj.verb = structKeyExists(local.r, "verb") ? local.r.verb : "get" />
+							<cfset requestObj.contentType = structKeyExists(local.r, "contentType") ? local.r.contentType : cgi.content_type />
+							<cfset requestObj.body = structKeyExists(local.r, "body") ? local.r.body : "" />
+							<cfset requestObj.headers = structKeyExists(local.r, "headers") ? local.r.headers : {} />
+						<cfelse>
+							<cfset throwError(400, "Batched request could not be parsed") />
+						</cfif>
+
+						<!--- check for format in the URI --->
+						<cfset requestObj.uriFormat = formatFromURI(requestObj.uri) />
+
+						<!--- attempt to find the cfc for the requested uri --->
+						<cfset requestObj.matchingRegex = matchURI(requestObj.uri) />
+
+						<!--- uri doesn't map to any known resources --->
+						<cfif not len(requestObj.matchingRegex)>
+							<cfset requestObj.uri = "" />
+							<cfset requestObj.statusCode = 404 />
+							<cfset requestObj.statusMsg = "Not Found" />
+						</cfif>
+
+						<cfset arrayAppend(resourceRequests, requestObj) />
+					</cfloop>
+				<cfelse>
+					<cfset throwError(400, "Batched requests must be furnished as a JSON array") />
+				</cfif>
 			<cfelse>
-				<cfif contentTypeIsSupported(requestObj.contentType)>
-					<cfset requestObj.bodyArgs = getDeserialized(requestObj.body, requestObj.contentType) />
+				<cfset throwError(400, "Batched requests must be furnished as a JSON array") />
+			</cfif>
+		<cfelse>
+			<!--- grab request headers --->
+			<cfset requestObj.headers = getHTTPRequestData().headers />
+
+			<!--- check for format in the URI --->
+			<cfset requestObj.uriFormat = formatFromURI(requestObj.uri) />
+
+			<!--- attempt to find the cfc for the requested uri --->
+			<cfset requestObj.matchingRegex = matchURI(requestObj.uri) />
+
+			<!--- uri doesn't map to any known resources --->
+			<cfif not len(requestObj.matchingRegex)>
+				<cfset throwError(404, "Not Found") />
+			</cfif>
+
+			<cfset requestObj.contentType = cgi.content_type />
+			<cfif len(requestObj.body) AND requestObj.body neq "null">
+				<cfif findNoCase("multipart/form-data", requestObj.contentType)>
+					<!--- do nothing, to support the way railo handles multipart requests (just avoids the error condition below) --->
 					<cfset requestObj.queryString = cgi.query_string />
 				<cfelse>
-					<cfif isJson(requestObj.body)>
-						<cfset throwError(400, "Looks like you're sending JSON data, but you haven't specified a content type. Aborting request.") />
+					<cfif contentTypeIsSupported(requestObj.contentType)>
+						<cfset requestObj.bodyArgs = getDeserialized(requestObj.body, requestObj.contentType) />
+						<cfset requestObj.queryString = cgi.query_string />
 					<cfelse>
-						<cfset throwError(400, "You must specify a content-type. Aborting request.") />
+						<cfif isJson(requestObj.body)>
+							<cfset throwError(400, "Looks like you're sending JSON data, but you haven't specified a content type. Aborting request.") />
+						<cfelse>
+							<cfset throwError(400, "You must specify a content-type. Aborting request.") />
+						</cfif>
 					</cfif>
 				</cfif>
+			<cfelse>
+				<!--- actual query parameters --->
+				<cfset requestObj.queryString = cgi.query_string />
 			</cfif>
-		<cfelse>
-			<!--- actual query parameters --->
-			<cfset requestObj.queryString = cgi.query_string />
+
+			<cfset arrayAppend(resourceRequests, requestObj) />
 		</cfif>
 
-		<!--- grab request headers --->
-		<cfset requestObj.headers = getHTTPRequestData().headers />
+		<cfloop from="1" to="#arrayLen(resourceRequests)#" index="local.i">
+			<cfset requestObj = resourceRequests[local.i] />
 
-		<!--- build the argumentCollection to pass to the cfc --->
-		<cfset requestObj.requestArguments = buildRequestArguments(
-			requestObj.matchingRegex,
-			requestObj.matchDetails.tokens,
-			requestObj.uri,
-			requestObj.queryString,
-			requestObj.headers
-		) />
-		<!--- include any deserialized body params --->
-		<cfif structKeyExists(requestObj, "bodyArgs")>
-			<cfset structAppend(requestObj.requestArguments, requestObj.bodyArgs) />
-		</cfif>
-		<!--- also capture form POST data (higher priority that url variables of same name) --->
-		<cfset structAppend(requestObj.requestArguments, form) />
+			<!--- get the cfc name and token array for the matching regex --->
+			<cfset requestObj.matchDetails = application._taffy.endpoints[requestObj.matchingRegex] />
 
-		<!--- if JSONP is enabled, capture the requested callback name --->
-		<cfif application._taffy.settings.jsonp neq false>
-			<cfif structKeyExists(requestObj.requestArguments, application._taffy.settings.jsonp)>
-				<!--- variables.framework.jsonp contains the callback parameter name --->
-				<cfset requestObj.jsonpCallback = requestObj.requestArguments[application._taffy.settings.jsonp] />
+			<cfif structKeyExists(application._taffy.endpoints[requestObj.matchingRegex].methods, requestObj.verb)>
+				<cfset requestObj.method = application._taffy.endpoints[requestObj.matchingRegex].methods[requestObj.verb] />
+			<cfelse>
+				<cfset requestObj.method = "" />
 			</cfif>
-		</cfif>
 
-		<!--- use requested mime type or the default --->
-		<cfset requestObj.returnMimeExt = "" />
-		<cfif structKeyExists(requestObj.requestArguments, "_taffy_mime")>
-			<cfset requestObj.returnMimeExt = requestObj.requestArguments._taffy_mime />
-			<cfif left(requestObj.returnMimeExt, 1) eq ".">
-				<cfset requestObj.returnMimeExt = right(requestObj.returnMimeExt, len(requestObj.returnMimeExt)-1) />
+			<!--- build the argumentCollection to pass to the cfc --->
+			<cfset requestObj.requestArguments = buildRequestArguments(
+				requestObj.matchingRegex,
+				requestObj.matchDetails.tokens,
+				requestObj.uri,
+				requestObj.queryString,
+				requestObj.headers
+			) />
+
+			<!--- include any deserialized body params --->
+			<cfif structKeyExists(requestObj, "bodyArgs")>
+				<cfset structAppend(requestObj.requestArguments, requestObj.bodyArgs) />
 			</cfif>
-			<cfif requestObj.returnMimeExt eq "*/*">
+			also capture form POST data (higher priority that url variables of same name)
+			<cfset structAppend(requestObj.requestArguments, form) />
+
+			<!--- if JSONP is enabled, capture the requested callback name --->
+			<cfif application._taffy.settings.jsonp neq false>
+				<cfif structKeyExists(requestObj.requestArguments, application._taffy.settings.jsonp)>
+					<!--- variables.framework.jsonp contains the callback parameter name --->
+					<cfset requestObj.jsonpCallback = requestObj.requestArguments[application._taffy.settings.jsonp] />
+				</cfif>
+			</cfif>
+
+			<!--- use requested mime type or the default --->
+			<cfset requestObj.returnMimeExt = "" />
+			<cfif structKeyExists(requestObj.requestArguments, "_taffy_mime")>
+				<cfset requestObj.returnMimeExt = requestObj.requestArguments._taffy_mime />
+				<cfif left(requestObj.returnMimeExt, 1) eq ".">
+					<cfset requestObj.returnMimeExt = right(requestObj.returnMimeExt, len(requestObj.returnMimeExt)-1) />
+				</cfif>
+				<cfif requestObj.returnMimeExt eq "*/*">
+					<cfset requestObj.returnMimeExt = application._taffy.settings.defaultMime />
+				</cfif>
+				<cfif not structKeyExists(application._taffy.settings.mimeExtensions, requestObj.returnMimeExt)>
+					<cfset throwError(400, "Requested mime type is not supported (#requestObj.returnMimeExt#)") />
+				</cfif>
+			<cfelseif requestObj.uriFormat neq "">
+				<cfset requestObj.returnMimeExt = requestObj.uriFormat />
+			<cfelse>
+				<!--- run some checks on the default --->
+				<cfif application._taffy.settings.defaultMime eq "">
+					<cfset throwError(400, "You have not specified a default mime type") />
+				<cfelseif not structKeyExists(application._taffy.settings.mimeExtensions, application._taffy.settings.defaultMime)>
+					<cfset throwError(400, "Your default mime type (#application._taffy.settings.defaultMime#) is not implemented") />
+				</cfif>
 				<cfset requestObj.returnMimeExt = application._taffy.settings.defaultMime />
 			</cfif>
-			<cfif not structKeyExists(application._taffy.settings.mimeExtensions, requestObj.returnMimeExt)>
-				<cfset throwError(400, "Requested mime type is not supported (#requestObj.returnMimeExt#)") />
+			<cfset structDelete(requestObj.requestArguments, "_taffy_mime") />
+			<!--- get the method metadata (if any) for onTaffyRequest --->
+			<cfif requestObj.method neq "">
+				<cfset requestObj.methodMetadata = application._taffy.endpoints[requestObj.matchingRegex].metadata[requestObj.method] />
+			<cfelse>
+				<!--- method will be "" when un-implemented method is requested (e.g. OPTIONS) --->
+				<cfset requestObj.methodMetadata = StructNew() />
 			</cfif>
-		<cfelseif requestObj.uriFormat neq "">
-			<cfset requestObj.returnMimeExt = requestObj.uriFormat />
-		<cfelse>
-			<!--- run some checks on the default --->
-			<cfif application._taffy.settings.defaultMime eq "">
-				<cfset throwError(400, "You have not specified a default mime type") />
-			<cfelseif not structKeyExists(application._taffy.settings.mimeExtensions, application._taffy.settings.defaultMime)>
-				<cfset throwError(400, "Your default mime type (#application._taffy.settings.defaultMime#) is not implemented") />
-			</cfif>
-			<cfset requestObj.returnMimeExt = application._taffy.settings.defaultMime />
-		</cfif>
-		<cfset structDelete(requestObj.requestArguments, "_taffy_mime") />
-		<!--- get the method metadata (if any) for onTaffyRequest --->
-		<cfif requestObj.method neq "">
-			<cfset requestObj.methodMetadata = application._taffy.endpoints[requestObj.matchingRegex].metadata[requestObj.method] />
-		<cfelse>
-			<!--- method will be "" when un-implemented method is requested (e.g. OPTIONS) --->
-			<cfset requestObj.methodMetadata = StructNew() />
-		</cfif>
-		<cfreturn requestObj />
+
+			<cfset requestObj.metrics.afterParse = getTickCount() />
+			<cfset requestObj.metrics.parseTime = requestObj.metrics.afterParse - requestObj.metrics.beforeParse />
+
+			<cfset resourceRequests[local.i] = requestObj />
+		</cfloop>
+
+		<cfreturn resourceRequests />
 	</cffunction>
 
 	<cffunction name="formatFromURI" access="private" output="false">
@@ -1338,6 +1416,10 @@
 		<cfreturn newRepresentation().noData() />
 	</cffunction>
 
+	<cffunction name="noContent" access="public" output="false">
+		<cfreturn newRepresentation().noContent() />
+	</cffunction>
+
 	<cffunction name="representationOf" access="public" output="false">
 		<cfargument name="data" required="true" />
 		<cfreturn newRepresentation().setData( arguments.data ) />
@@ -1369,16 +1451,6 @@
 			<cfreturn "" />
 		</cfif>
 		<cfreturn cgi.path_info />
-	</cffunction>
-
-	<cffunction name="addHeaders" access="public" output="false" returntype="void">
-		<cfargument name="headers" type="struct" required="true" />
-		<cfset var h = '' />
-		<cfif !structIsEmpty(arguments.headers)>
-			<cfloop list="#structKeyList(arguments.headers)#" index="h">
-				<cfheader name="#h#" value="#arguments.headers[h]#" />
-			</cfloop>
-		</cfif>
 	</cffunction>
 
 	<cffunction name="getBasicAuthCredentials" access="public" output="false" returntype="Struct">
